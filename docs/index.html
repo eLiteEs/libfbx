@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>fbx – Console Framebuffer Library</title>
+</head>
+<body style="margin-left: 20%; margin-right: 20%;">
+    <center>
+        <h1><font face="monospace" color="#0044cc">fbx – Console Framebuffer Library</font></h1>
+        <h3><font color="#006600">Version 1.0.0 – Cross‑platform terminal graphics & input in C++17</font></h3>
+    </center>
+    <hr size="4" noshade>
+
+    <h2><font color="#880000">▸ Overview</font></h2>
+    <p><b>fbx</b> gives you a <b>framebuffer for the terminal</b>: a 2D grid of cells where each cell holds a UTF‑8 grapheme, foreground/background colors (256‑palette or truecolor), and text styles (bold, italic, underline, etc.). You can draw with escape‑sequence‑aware printing, composite multiple buffers, manage layers or tiled layouts, read keys with full modifier support, and use familiar <code>std::ostream</code>/<code>std::istream</code> interfaces.</p>
+    <p>Works on <b>Linux</b> (via termios, poll) and <b>Windows</b> (via virtual terminal sequences). Requires C++17.</p>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Core features</font></h2>
+    <ul>
+        <li>Unicode + ANSI cell model (grapheme clusters, wide characters, combining)</li>
+        <li>Dirty‑tracking and differential rendering</li>
+        <li>Region snapshots (save/restore any rectangular area)</li>
+        <li>Layer compositing (z‑order, offset, transparency via empty cell)</li>
+        <li>Tiling (horizontal/vertical split with proportional weights)</li>
+        <li>Raw keyboard input with Ctrl, Alt, Shift modifiers</li>
+        <li><code>fbxostream</code> – write to a framebuffer like std::cout</li>
+        <li><code>fbxistream</code> – read a line with inline editing inside the framebuffer</li>
+        <li>Escape sequence parser (cursor movement, SGR colors, clear screen, etc.)</li>
+    </ul>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Core types</font></h2>
+
+    <h3>Color</h3>
+    <pre><code>enum class ColorMode { Default, Color256, TrueColor };
+
+struct Color {
+    static Color none();               // terminal default
+    static Color palette(uint8_t idx); // 0‑255
+    static Color rgb(uint8_t r, uint8_t g, uint8_t b);
+    static Color black(), red(), green(), yellow(), blue(), magenta(), cyan(), white();
+    static Color bright_black(), bright_red(), ...; // 16 ANSI names
+};</code></pre>
+
+    <h3>StyleFlags</h3>
+    <pre><code>Style_None      = 0
+Style_Bold      = 1 &lt;&lt; 0
+Style_Dim       = 1 &lt;&lt; 1
+Style_Italic    = 1 &lt;&lt; 2
+Style_Underline = 1 &lt;&lt; 3
+Style_Blink     = 1 &lt;&lt; 4
+Style_Reverse   = 1 &lt;&lt; 5
+Style_Strike    = 1 &lt;&lt; 6</code></pre>
+
+    <h3>Cell</h3>
+    <pre><code>struct Cell {
+    std::string ch;      // UTF‑8 grapheme (empty = transparent)
+    Color fg, bg;
+    uint8_t style;
+    uint8_t width;       // 1 or 2 for wide chars
+    bool dirty;
+};</code></pre>
+
+    <h3>Attr (builder for current attributes)</h3>
+    <pre><code>Attr a = Attr{}.set_fg(Color::red()).bold().underline();
+Cell c = a.apply("A");</code></pre>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Console module (fbx::console)</font></h2>
+    <p>Low‑level terminal control and raw input.</p>
+    <pre><code>namespace fbx::console {
+    Size get_size();                     // returns {cols, rows}
+    void move_cursor(int col, int row);
+    void hide_cursor();
+    void show_cursor();
+    void enter_alt_screen();
+    void leave_alt_screen();
+    void set_raw_mode(bool enable);      // no echo, no line buffering
+    void clear_screen();
+    void flush();
+
+    // key reading
+    std::optional&lt;std::string&gt; read_key(int timeout_ms = -1);
+    Key getch(int timeout_ms = -1);      // parsed key, blocks
+    std::optional&lt;Key&gt; _getch(int timeout_ms = 0); // non‑blocking
+
+    bool input_ready();
+    std::optional&lt;Pos&gt; query_cursor_pos(); // via DSR
+}</code></pre>
+
+    <h3>Key structure</h3>
+    <pre><code>struct Key {
+    enum class Kind { Char, Control, Arrow, Function, Navigation, Enter, Tab, Backspace, Escape, Unknown };
+    Kind kind;
+    std::string name;   // "Up", "F5", "Ctrl+C", "a"
+    uint32_t codepoint;
+    bool mod_ctrl, mod_alt, mod_shift;
+
+    bool is_ctrl(char letter) const; // e.g. is_ctrl('c')
+    bool is_escape() const;
+    int fn() const;     // function key number (1‑based)
+    std::string ch() const; // UTF‑8 for printable chars
+};</code></pre>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Framebuffer (fbx::Framebuffer)</font></h2>
+    <p>Main drawing surface.</p>
+
+    <h3>Construction & dimensions</h3>
+    <pre><code>Framebuffer fb(80, 24);
+fb.resize(120, 30, true);   // preserve content
+fb.fit_to_terminal();       // resize to current terminal size</code></pre>
+
+    <h3>Cell access</h3>
+    <pre><code>fb.put_char(col, row, "█", Color::yellow(), Color::blue(), Style_Bold);
+Cell&amp; c = fb.cell(x, y);
+std::string ch = fb.get_char(x, y);</code></pre>
+
+    <h3>High‑level printing (escape‑sequence aware)</h3>
+    <pre><code>fb.set_cursor(5, 10);
+fb.print("\x1b[1;31mHello \x1b[4mWorld\x1b[0m!\n");
+// supports: \n, \r, \t, ESC[A/B/C/D, ESC[H, ESC[m, ESC[2J, ESC[K, etc.</code></pre>
+
+    <h3>Region snapshots</h3>
+    <pre><code>Rect area = {10, 5, 20, 10};
+Snapshot snap = fb.save_region(area);
+// ... draw something over the area ...
+fb.restore_region(snap);  // revert</code></pre>
+
+    <h3>Compositing</h3>
+    <pre><code>Framebuffer overlay(10, 5);
+overlay.put_char(0, 0, "X", Color::red());
+fb.composite(overlay, 5, 5);  // paste at offset, skipping transparent cells</code></pre>
+
+    <h3>Rendering</h3>
+    <pre><code>fb.render();           // incremental, only dirty cells
+fb.render_region({0,0,10,10});
+std::string ansi = fb.to_ansi();  // full image as ANSI string</code></pre>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ FramebufferManager</font></h2>
+    <p>Manages multiple framebuffers and composes them into a single terminal output.</p>
+
+    <h3>Buffer lifecycle</h3>
+    <pre><code>FramebufferManager mgr;
+FbId bg = mgr.create(80, 24, "background");
+FbId fg = mgr.create_fullscreen("overlay");
+Framebuffer* fb = mgr.get(bg);</code></pre>
+
+    <h3>Layer mode (compositing with z‑order)</h3>
+    <pre><code>mgr.add_layer(bg, 0, 0, 0);  // bottom
+mgr.add_layer(fg, 5, 3, 1);  // top
+mgr.set_layer_visible(fg, true);
+mgr.flush();  // composite and render</code></pre>
+
+    <h3>Tile mode (split screen)</h3>
+    <pre><code>TileLayout layout;
+layout.dir = TileDir::Horizontal;
+layout.panes = { {left_id, 1}, {right_id, 2} }; // weights 1 and 2
+mgr.set_tiles(layout);
+mgr.flush();</code></pre>
+
+    <h3>Active buffer (single fullscreen)</h3>
+    <pre><code>mgr.set_active(fb_id);
+mgr.flush();</code></pre>
+
+    <h3>Terminal resize handling</h3>
+    <pre><code>void on_sigwinch(int) { mgr.on_resize(); }</code></pre>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Stream helpers (fbx::fbxostream, fbx::fbxistream)</font></h2>
+    <p>Convenient <code>std::ostream</code>/<code>std::istream</code> wrappers around a framebuffer.</p>
+
+    <h3>Output stream</h3>
+    <pre><code>Framebuffer fb(80, 24);
+fbxostream out(fb);
+out &lt;&lt; fbx::fg(Color::red()) &lt;&lt; "Error: " &lt;&lt; fbx::reset &lt;&lt; message &lt;&lt; '\n';
+out.at(10, 5) &lt;&lt; "Positioned text";</code></pre>
+
+    <h3>Input stream (line editor inside framebuffer)</h3>
+    <pre><code>fbxistream in(fb);
+std::string name = in.readline("Name: ");  // shows prompt, handles backspace, echo</code></pre>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Complete examples</font></h2>
+
+    <h3>Example 1: Key inspector (raw mode)</h3>
+    <pre><code>#include &lt;fbx/fbx.hpp&gt;
+int main() {
+    fbx::console::enter_alt_screen();
+    fbx::console::hide_cursor();
+    fbx::console::set_raw_mode(true);
+
+    fbx::Framebuffer fb(fbx::console::get_size());
+    fb.print("Press any key (Ctrl+Q to quit)");
+
+    while (true) {
+        auto k = fbx::console::getch();
+        if (k.is_ctrl('q') || k.is_escape()) break;
+
+        fb.clear();
+        fb.print("Key: " + k.name + "\n");
+        fb.print("Raw: ");
+        for (unsigned char c : k.raw)
+            fb.print(fbx::fmt::hex(c) + " ");
+        fb.render();
+    }
+
+    fbx::console::set_raw_mode(false);
+    fbx::console::show_cursor();
+    fbx::console::leave_alt_screen();
+}</code></pre>
+
+    <h3>Example 2: Layer compositing with snapshot</h3>
+    <pre><code>#include &lt;fbx/fbx.hpp&gt;
+int main() {
+    using namespace fbx;
+    console::enter_alt_screen();
+    console::set_raw_mode(true);
+
+    FramebufferManager mgr;
+    FbId bg = mgr.create_fullscreen("bg");
+    FbId dlg = mgr.create(40, 10, "dialog");
+    mgr.add_layer(bg, 0, 0, 0);
+    mgr.add_layer(dlg, 5, 3, 1);
+
+    Framebuffer* bgfb = mgr.get(bg);
+    // draw checkerboard background
+    for (int r = 0; r &lt; bgfb->rows(); ++r)
+        for (int c = 0; c &lt; bgfb->cols(); ++c)
+            bgfb->put_char(c, r, ((r+c)%2) ? "▒" : "░");
+
+    Snapshot behind = bgfb->save_region({5,3,40,10});
+
+    Framebuffer* dlgfb = mgr.get(dlg);
+    dlgfb->fill_rect({0,0,40,10}, Cell{" ", Color::none(), Color::blue()});
+    dlgfb->print("\x1b[1;37mDialog on top\x1b[0m");
+
+    mgr.flush();
+    console::read_key(-1); // wait for key
+
+    bgfb->restore_region(behind);
+    mgr.remove_layer(dlg);
+    mgr.flush();
+
+    console::set_raw_mode(false);
+    console::leave_alt_screen();
+}</code></pre>
+
+    <h3>Example 3: Using fbxostream and fbxistream</h3>
+    <pre><code>#include &lt;fbx/fbx.hpp&gt;
+int main() {
+    using namespace fbx;
+    console::enter_alt_screen();
+    console::set_raw_mode(true);
+
+    Framebuffer fb(console::get_size());
+    fbxostream out(fb);
+    fbxistream in(fb);
+
+    out &lt;&lt; "\x1b[1;36mStream demo\x1b[0m\n";
+    out &lt;&lt; "Enter your name: ";
+    fb.render();  // show prompt
+
+    std::string name = in.readline();
+    out &lt;&lt; "\nHello, " &lt;&lt; name &lt;&lt; "!\nPress any key to exit.";
+    fb.render();
+    console::read_key(-1);
+
+    console::set_raw_mode(false);
+    console::leave_alt_screen();
+    return 0;
+}</code></pre>
+
+    <hr noshade>
+
+    <h2><font color="#880000">▸ Building & integration</font></h2>
+    <p>fbx uses CMake. Include it via <code>add_subdirectory</code> or <code>find_package</code>.</p>
+    <pre><code># In your CMakeLists.txt:
+add_subdirectory(path/to/fbx)
+target_link_libraries(your_app PRIVATE fbx::fbx)</code></pre>
+
+    <p>You can also use CPM like this:</p>
+    <pre><code>cmake_minimum_required(VERSION 3.15)
+project(MyFbxProject)
+
+set(CMAKE_CXX_STANDARD 17)
+
+# ---- Add CPM.cmake ----
+if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
+    file(DOWNLOAD https://github.com/cpm-cmake/CPM.cmake/releases/latest/download/get_cpm.cmake
+         ${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
+endif()
+include(${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
+
+# ---- Declare fbx dependency ----
+CPMAddPackage(
+    NAME fbx
+    GITHUB_REPOSITORY eLiteEs/fbx 
+    GIT_TAG v1.0.0
+)
+
+# ---- Your application ----
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE fbx::fbx)</code></pre>
+
+    <p>Compile with C++17 and enable terminal features on Windows (link with <code>winmm</code> and <code>user32</code> automatically).</p>
+    <p>Examples can be built with <code>-DFBX_BUILD_EXAMPLES=ON</code>.</p>
+
+    <hr noshade>
+    <center>
+        <font size="2" color="#555555">fbx – Console Framebuffer Library | MIT License</font>
+    </center>
+</body>
+</html>
+
